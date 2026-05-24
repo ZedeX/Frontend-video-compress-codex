@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>视频压缩工具 - WebCodecs 纯前端转码 (Mediabunny)</title>
+  <title>视频压缩工具 - WebCodecs 纯前端转码</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mediabunny@1.40.1/dist/bundles/mediabunny.cjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js"></script>
   <style>
     :root {
       --primary: #6366f1;
@@ -330,7 +330,7 @@
         </div>
         <div>
           <h1 class="text-lg font-bold">视频压缩工具</h1>
-          <p class="text-xs text-zinc-400">WebCodecs + Mediabunny</p>
+          <p class="text-xs text-zinc-400">WebCodecs 纯前端转码</p>
         </div>
       </div>
 
@@ -401,7 +401,7 @@
     <!-- 主标题 -->
     <div class="mb-8 text-center">
       <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">纯前端视频压缩</h2>
-      <p class="mt-2 text-zinc-400">使用 WebCodecs API + Mediabunny，视频不离开您的设备，100% 隐私安全</p>
+      <p class="mt-2 text-zinc-400">使用 WebCodecs API + mp4-muxer，视频不离开您的设备，100% 隐私安全</p>
     </div>
 
     <!-- 主要内容区 -->
@@ -671,7 +671,6 @@
                 <option value="480p">480p (854x480)</option>
                 <option value="360p">360p (640x360)</option>
               </select>
-              <p id="resolutionHint" class="text-xs text-yellow-500 hidden"></p>
             </div>
 
             <!-- 视频比特率 -->
@@ -681,7 +680,6 @@
                 <span id="bitrateValue" class="text-sm font-medium">2500 kbps</span>
               </div>
               <input type="range" id="bitrateSlider" min="100" max="20000" step="50" value="2500">
-              <p id="bitrateHint" class="text-xs text-yellow-500 hidden"></p>
             </div>
 
             <!-- 帧率 -->
@@ -690,8 +688,7 @@
                 <label class="text-sm font-medium">输出帧率</label>
                 <span id="fpsValue" class="text-sm font-medium">30 FPS</span>
               </div>
-              <input type="range" id="fpsSlider" min="10" max="60" step="1" value="30">
-              <p id="fpsHint" class="text-xs text-yellow-500 hidden"></p>
+              <input type="range" id="fpsSlider" min="15" max="60" step="5" value="30">
             </div>
 
             <hr class="border-zinc-800">
@@ -942,35 +939,39 @@
     };
 
     // ==================== 质量预设配置 ====================
+    // 注意：这些是相对比例，实际值会根据原始视频属性进行计算且不超过原始值
     const PRESET_CONFIGS = {
       low: {
         name: '高压缩',
-        targetBitrate: 600,
-        targetResolution: '360p',
+        bitrateMultiplier: 0.3,
+        resolutionScale: 0.5,
+        fpsMultiplier: 0.8,
         targetFps: 15,
         maxBitrate: 600,
         maxResolution: '360p',
-        maxFps: 15,
+        maxFps: 18,
         description: '文件最小，适合快速分享'
       },
       medium: {
         name: '平衡',
-        targetBitrate: 800,
-        targetResolution: '480p',
+        bitrateMultiplier: 0.5,
+        resolutionScale: 0.75,
+        fpsMultiplier: 1,
         targetFps: 18,
-        maxBitrate: 800,
+        maxBitrate: 1500,
         maxResolution: '480p',
-        maxFps: 18,
+        maxFps: 20,
         description: '质量与大小的平衡'
       },
       high: {
         name: '高质量',
-        targetBitrate: 1000,
-        targetResolution: '720p',
-        targetFps: 24,
-        maxBitrate: 1000,
+        bitrateMultiplier: 0.8,
+        resolutionScale: 1,
+        fpsMultiplier: 1,
+        targetFps: null,
+        maxBitrate: 2000,
         maxResolution: '720p',
-        maxFps: 24,
+        maxFps: 30,
         description: '接近原画质'
       },
       custom: null
@@ -1029,9 +1030,6 @@
       bitrateValue: $('bitrateValue'),
       fpsSlider: $('fpsSlider'),
       fpsValue: $('fpsValue'),
-      fpsHint: $('fpsHint'),
-      bitrateHint: $('bitrateHint'),
-      resolutionHint: $('resolutionHint'),
       compressBtn: $('compressBtn'),
       cancelBtn: $('cancelBtn'),
       newVideoBtn: $('newVideoBtn'),
@@ -1137,18 +1135,49 @@
       const preset = PRESET_CONFIGS[presetKey];
       if (!preset || presetKey === 'custom') return null;
 
+      // 原始视频属性
       const originalBitrate = videoInfo.bitrate || 5000;
       const originalWidth = videoInfo.width;
       const originalHeight = videoInfo.height;
       const originalFps = videoInfo.fps || 30;
 
-      let targetBitrate = Math.min(preset.targetBitrate, originalBitrate);
+      // 计算目标比特率：基于原始的比例，但不超过预设最大值，也不超过原始
+      let targetBitrate = Math.min(
+        originalBitrate * preset.bitrateMultiplier,
+        preset.maxBitrate,
+        originalBitrate
+      );
 
-      let targetRes = preset.targetResolution;
+      // 计算目标分辨率
+      let targetRes;
+      if (preset.maxResolution === 'original') {
+        targetRes = 'original';
+      } else {
+        const maxResSize = resolutionToSize(preset.maxResolution, originalWidth, originalHeight);
+        const scaledWidth = originalWidth * preset.resolutionScale;
+        // 选择不超过 scaledWidth 和 maxResSize 的标准分辨率
+        targetRes = selectResolutionByWidth(
+          Math.min(scaledWidth, maxResSize.width),
+          originalWidth,
+          originalHeight
+        );
+      }
       targetRes = clampResolution(targetRes, originalWidth, originalHeight);
 
-      let targetFps = Math.min(preset.targetFps, originalFps);
-      targetFps = Math.max(10, targetFps);
+      let targetFps;
+      if (preset.targetFps) {
+        targetFps = Math.min(preset.targetFps, originalFps, preset.maxFps);
+      } else {
+        targetFps = Math.min(
+          Math.round(originalFps * preset.fpsMultiplier),
+          preset.maxFps,
+          originalFps
+        );
+      }
+      targetFps = Math.max(15, targetFps);
+
+      const bitrateRange = getBitrateRangeForResolution(targetRes);
+      targetBitrate = Math.max(bitrateRange.min, Math.min(targetBitrate, bitrateRange.max));
 
       return {
         bitrate: Math.round(targetBitrate),
@@ -1159,16 +1188,17 @@
     }
 
     // 根据目标文件大小计算最佳参数
-    function calculateParamsForTargetSize(targetSizeBytes, videoInfo, platformConfig = null, maxSizeMB = null) {
+    function calculateParamsForTargetSize(targetSizeBytes, videoInfo, platformConfig = null) {
       if (!videoInfo) return null;
 
       const duration = videoInfo.duration;
-      const audioBitrate = state.settings.audioBitrate || 128;
+      const audioBitrate = state.settings.audioBitrate || 128; // kbps
       const originalWidth = videoInfo.width;
       const originalHeight = videoInfo.height;
       const originalBitrate = videoInfo.bitrate || 5000;
       const originalFps = videoInfo.fps || 30;
 
+      // 从平台配置获取限制
       let maxBitrate = Infinity;
       let maxResolution = '8k';
       let maxFps = 120;
@@ -1185,34 +1215,30 @@
         recommendedFps = platformConfig.fps || 30;
       }
 
+      // 计算目标帧率（先确定帧率，因为它会影响比特率计算）
       let targetFps;
       if (recommendedFps) {
         targetFps = Math.min(recommendedFps, originalFps, maxFps);
-      } else if (maxSizeMB !== null) {
-        if (maxSizeMB <= 10) {
-          targetFps = Math.min(15, originalFps);
-        } else if (maxSizeMB <= 20) {
-          targetFps = Math.min(18, originalFps);
-        } else if (maxSizeMB <= 50) {
-          targetFps = Math.min(20, originalFps);
-        } else {
-          targetFps = Math.min(24, originalFps);
-        }
       } else {
-        targetFps = Math.min(24, originalFps, maxFps);
+        targetFps = Math.min(30, originalFps, maxFps);
       }
-      targetFps = Math.max(10, targetFps);
+      targetFps = Math.max(15, targetFps); // 最低15fps
 
+      // 帧率比例因子（相对于30fps）
       const fpsFactor = targetFps / 30;
 
-      const safetyMargin = 0.93;
-      const totalBitrate = (targetSizeBytes * 8 * safetyMargin) / duration / 1000 / fpsFactor;
+      // 计算可用于视频的总比特率，考虑帧率影响
+      // 公式: 总比特率 = (目标大小 × 8 / 时长) / 帧率因子
+      const safetyMargin = 0.93; // 留出 7% 余量
+      const totalBitrate = (targetSizeBytes * 8 * safetyMargin) / duration / 1000 / fpsFactor; // kbps
       let videoBitrate = Math.max(100, totalBitrate - audioBitrate);
 
+      // 根据比特率选择合适的分辨率（从低到高尝试）
       let resolution;
       if (recommendedResolution) {
         resolution = clampResolution(recommendedResolution, originalWidth, originalHeight);
       } else {
+        // 根据比特率自动选择（考虑帧率因子后的有效比特率）
         const effectiveBitrate = videoBitrate * fpsFactor;
         if (effectiveBitrate >= 15000) {
           resolution = '4k';
@@ -1228,6 +1254,7 @@
         resolution = clampResolution(resolution, originalWidth, originalHeight);
       }
 
+      // 确保分辨率不超过平台限制
       resolution = clampResolution(resolution, originalWidth, originalHeight);
       const maxResSize = resolutionToSize(maxResolution, originalWidth, originalHeight);
       const currentResSize = resolutionToSize(resolution, originalWidth, originalHeight);
@@ -1235,22 +1262,27 @@
         resolution = clampResolution(maxResolution, originalWidth, originalHeight);
       }
 
+      // 获取该分辨率的合理比特率范围
       const bitrateRange = getBitrateRangeForResolution(resolution);
 
+      // 如果有推荐比特率，优先使用
       if (recommendedBitrate) {
         const recSize = ((recommendedBitrate * fpsFactor + audioBitrate) * duration * 1000) / 8;
-        if (recSize <= targetSizeBytes * 1.1) {
+        if (recSize <= targetSizeBytes * 1.1) { // 允许超10%
           videoBitrate = recommendedBitrate;
         }
       }
 
+      // 限制比特率在合理范围内（不乘以fpsFactor，因为fpsFactor已经在前期计算过了）
       videoBitrate = Math.max(bitrateRange.min, Math.min(videoBitrate, bitrateRange.max, maxBitrate, originalBitrate));
 
+      // 如果即使最小比特率也超出目标大小，尝试降低帧率
       let currentEstSize = ((videoBitrate * fpsFactor + audioBitrate) * duration * 1000) / 8;
-      if (currentEstSize > targetSizeBytes && targetFps > 10) {
-        const fpsOptions = [20, 18, 15, 12, 10];
+      if (currentEstSize > targetSizeBytes && targetFps > 15) {
+        // 尝试降低帧率
+        const fpsOptions = [25, 20, 15];
         for (const testFps of fpsOptions) {
-          if (testFps >= originalFps) continue;
+          if (testFps >= originalFps) continue; // 不能超过原始帧率
           const testFpsFactor = testFps / 30;
           const testSize = ((videoBitrate * testFpsFactor + audioBitrate) * duration * 1000) / 8;
           if (testSize <= targetSizeBytes) {
@@ -1345,10 +1377,10 @@
       if (!state.videoInfo) return;
 
       state.selectedMaxSize = maxSizeMB;
-      state.selectedPlatform = null;
+      state.selectedPlatform = null; // 清除平台选择
 
       const targetSizeBytes = maxSizeMB * 1024 * 1024;
-      const params = calculateParamsForTargetSize(targetSizeBytes, state.videoInfo, null, maxSizeMB);
+      const params = calculateParamsForTargetSize(targetSizeBytes, state.videoInfo);
 
       if (params) {
         state.settings.bitrate = params.bitrate;
@@ -1748,10 +1780,7 @@
 
     function updateQualityWarnings() {
       const { settings, videoInfo } = state;
-
-      el.fpsHint.classList.add('hidden');
-      el.bitrateHint.classList.add('hidden');
-      el.resolutionHint.classList.add('hidden');
+      const warnings = [];
 
       if (videoInfo) {
         const originalFps = videoInfo.fps || 30;
@@ -1762,23 +1791,23 @@
         const currentPixels = resMap[settings.resolution] || originalPixels;
 
         if (settings.fps < 20) {
-          el.fpsHint.textContent = '⚠️ 帧率较低，播放可能出现卡顿';
-          el.fpsHint.classList.remove('hidden');
+          warnings.push('⚠️ 帧率较低，播放可能出现卡顿');
         }
 
         if (settings.bitrate < 1000 || (currentPixels > 0 && settings.bitrate < currentPixels / 1000)) {
-          el.bitrateHint.textContent = '⚠️ 比特率较低，画面可能出现马赛克或失真';
-          el.bitrateHint.classList.remove('hidden');
+          warnings.push('⚠️ 比特率较低，画面可能出现马赛克或失真');
         }
 
         if (currentPixels < originalPixels * 0.25 && currentPixels < 480 * 854) {
-          el.resolutionHint.textContent = '⚠️ 分辨率较低，画面可能出现模糊';
-          el.resolutionHint.classList.remove('hidden');
+          warnings.push('⚠️ 分辨率较低，画面可能出现模糊');
         }
       }
 
-      if (settings.quality === 'custom') {
-        el.presetHint.textContent = '已切换为自定义模式，参数可能与平台要求或预期大小不符';
+      if (warnings.length > 0) {
+        el.presetHint.textContent = warnings.join(' | ');
+        el.presetHint.classList.remove('hidden');
+      } else if (settings.quality === 'custom') {
+        el.presetHint.textContent = '已切换为自定义模式';
         el.presetHint.classList.remove('hidden');
       } else {
         el.presetHint.classList.add('hidden');
@@ -2029,33 +2058,32 @@
     async function compressWithWebCodecs(targetWidth, targetHeight, startTime) {
       const { videoInfo, settings, abortController, compressionParams } = state;
 
+      // 使用计算后的参数（确保不超过原始）
       const fps = compressionParams?.fps || calculateOutputFps(videoInfo, settings);
       const bitrate = compressionParams?.bitrate || calculateOutputBitrate(videoInfo, settings);
 
-      const MB = window.Mediabunny;
-      if (!MB || !MB.Output || !MB.Mp4OutputFormat || !MB.BufferTarget) {
+      const MuxerClass = window.Mp4Muxer?.Muxer;
+      const ArrayBufferTargetClass = window.Mp4Muxer?.ArrayBufferTarget;
+
+      if (!MuxerClass || !ArrayBufferTargetClass) {
         return await compressWithMediaRecorder(targetWidth, targetHeight, startTime);
       }
 
-      const { Output, Mp4OutputFormat, BufferTarget, EncodedVideoPacketSource, EncodedPacket } = MB;
-
-      let output, videoPacketSource;
+      let muxer, target;
       try {
-        output = new Output({
-          format: new Mp4OutputFormat({ fastStart: true }),
-          target: new BufferTarget()
+        target = new ArrayBufferTargetClass();
+        muxer = new MuxerClass({
+          target,
+          video: { codec: 'avc', width: targetWidth, height: targetHeight },
+          audio: { codec: 'aac', sampleRate: 48000, numberOfChannels: 2 },
+          fastStart: true,
         });
-
-        videoPacketSource = new EncodedVideoPacketSource('avc');
-        output.addVideoTrack(videoPacketSource);
       } catch (e) {
-        console.error('Mediabunny 初始化失败:', e);
         return await compressWithMediaRecorder(targetWidth, targetHeight, startTime);
       }
 
       let encodedFrames = 0;
       const totalFrames = Math.ceil(videoInfo.duration * fps);
-      let isFirstChunk = true;
 
       const codecCandidates = ['avc1.42001E', 'avc1.4D401E', 'avc1.64001E'];
       let supportedCodec = null;
@@ -2071,28 +2099,11 @@
       if (!supportedCodec) throw new Error('浏览器不支持视频编码器');
 
       const videoEncoder = new VideoEncoder({
-        output: async (chunk, meta) => {
-          try {
-            const packet = EncodedPacket.fromEncodedChunk(chunk);
-            if (isFirstChunk) {
-              isFirstChunk = false;
-              await videoPacketSource.add(packet, {
-                decoderConfig: {
-                  codec: supportedCodec,
-                  codedWidth: targetWidth,
-                  codedHeight: targetHeight,
-                  description: meta?.description
-                }
-              });
-            } else {
-              await videoPacketSource.add(packet);
-            }
-            encodedFrames++;
-            const progress = (encodedFrames / totalFrames) * 100;
-            updateProgress(progress, null);
-          } catch (e) {
-            console.error('添加视频包错误:', e);
-          }
+        output: (chunk, meta) => {
+          muxer.addVideoChunk(chunk, meta);
+          encodedFrames++;
+          const progress = (encodedFrames / totalFrames) * 100;
+          updateProgress(progress, null);
         },
         error: (e) => console.error('编码错误:', e)
       });
@@ -2115,6 +2126,7 @@
       canvas.height = targetHeight;
       const ctx = canvas.getContext('2d');
 
+      // 预览画布
       const previewCtx = el.previewCanvas.getContext('2d');
 
       const frameInterval = 1 / fps;
@@ -2131,6 +2143,7 @@
 
         ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
+        // 更新预览
         previewCtx.drawImage(canvas, 0, 0, el.previewCanvas.width, el.previewCanvas.height);
 
         const frame = new VideoFrame(canvas, {
@@ -2147,8 +2160,8 @@
       await videoEncoder.flush();
       videoEncoder.close();
 
-      await output.finalize();
-      const buffer = output.target.buffer;
+      muxer.finalize();
+      const buffer = target.buffer;
       const blob = new Blob([buffer], { type: 'video/mp4' });
 
       finishCompression(blob);

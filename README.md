@@ -61,7 +61,7 @@ Requires modern browsers with WebCodecs API support:
 
 - HTML5 + CSS3 + JavaScript (Vanilla)
 - [Tailwind CSS](https://tailwindcss.com/) - Styling framework
-- [Mediabunny](https://mediabunny.dev/) - MP4 container muxing
+- [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) - MP4 container muxing
 - WebCodecs API - Video encoding/decoding
 
 ## Local Development
@@ -70,8 +70,8 @@ Simply open `index.html` in your browser. No build tools required.
 
 ## Files
 
-- `index.html` - Main application (Mediabunny version)
-- `index-mp4-muxer.html` - Alternative version using mp4-muxer
+- `index.html` - Main application (mp4-muxer version)
+- `index-mediabunny.html` - Alternative version using Mediabunny
 - `favicon.svg` - Site icon
 
 ## License
